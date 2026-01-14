@@ -1,0 +1,32 @@
+python3 lerobot2rlds.py \
+    --src-dir /home/aryan/any4lerobot/apple\
+    --output-dir /home/aryan/any4lerobot/apple_box_rlds \
+    --task-name apple_box \
+    --max-episodes 5 
+
+
+deepansh-methdai/apple_box
+
+
+huggingface-cli download Aryan006/xr_teleop_1  \
+  --repo-type dataset \
+  --local-dir /home/aryan/drive2/new_data \
+  --cache-dir /home/aryan/drive2/new_data_cache \
+
+
+huggingface-cli download openvla/modified_libero_rlds  \
+  --repo-type dataset \
+  --local-dir /home/aryan/any4lerobot/oink 
+
+/home/aryan/.cache/huggingface/lerobot/deepansh-methdai
+
+/home/aryan/drive2/new_data/deepansh-methdai/pick-starfruit
+
+/home/aryan/drive2/new_data
+
+python convert_dataset_v21_to_v30.py \
+--repo-id=Aryan006/v2_to_v3 \
+--root=/home/aryan/drive2/humanoid_ws/src/any4lerobot/datasets/test_dataset2
+
+
+deepansh-methdai/apple_box

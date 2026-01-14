@@ -1,6 +1,3 @@
-##call gripper function
-##swap out states
-
 
 import requests
 
@@ -27,14 +24,6 @@ tfds.core.utils.gcs_utils._is_gcs_disabled = True
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 url_joint = "http://localhost:8000/pub_joints"
-
-# ---------------- PHASE-1 CACHE LOAD ----------------
-TRANSFORMS_PATH = Path("/home/aryan/any4lerobot/lerobot2rlds/transforms.npy")
-TRANSFORMS = np.load(TRANSFORMS_PATH, allow_pickle=True).item()
-STATE_PATH = Path("/home/aryan/any4lerobot/lerobot2rlds/states.npy")
-STATE = np.load(STATE_PATH, allow_pickle=True).item()
-# ----------------------------------------------------
-
 
 joint_names = [
     "left_hip_pitch_joint",
@@ -75,13 +64,14 @@ params = []
 # -------------------------------------------------
 def generate_config_from_features(features, encoding_format, **kwargs):
     action_info = {
-        "action": tfds.features.Tensor(
-            shape=(7,),
-            dtype=np.float32,
-            doc="ee_xyz_rpy_grip"
-        )
+        **{
+            "_".join(k.split(".")[2:]) or k.split(".")[-1]: tfds.features.Tensor(
+                shape=v["shape"], dtype=np.dtype(v["dtype"]), doc=v["names"]
+            )
+            for k, v in features.items()
+            if "action" in k
+        },
     }
-
 
     # RLDS allows dict OR tensor, but we will ALWAYS emit dicts
     return dict(
@@ -103,12 +93,13 @@ def generate_config_from_features(features, encoding_format, **kwargs):
                 for k, v in features.items()
                 if "observation.image" in k and "depth" in k
             },
-            # OVERRIDE STATE
-            "state": tfds.features.Tensor(
-                shape=(7,),
-                dtype=np.float32,
-                doc="ee_xyz_rpy_gripper"
-            ),
+            **{
+                "_".join(k.split(".")[2:]) or k.split(".")[-1]: tfds.features.Tensor(
+                    shape=v["shape"], dtype=np.dtype(v["dtype"]), doc=v["names"]
+                )
+                for k, v in features.items()
+                if "observation.state" in k
+            },
         },
         action_info=action_info,
         step_metadata_info={
@@ -178,7 +169,7 @@ def gripper_state(hand_state: np.ndarray, margin=0.1) -> int:
             # print("CLOSE")
         else:
             return 0 
-            # print("OPEN")
+            print("OPEN")
 
 
 # -------------------------------------------------
@@ -278,26 +269,14 @@ def parse_step(data_item):
 # DATASET BUILDER (UNCHANGED EXCEPT parse_step EFFECT)
 # -------------------------------------------------
 class DatasetBuilder(tfds.core.GeneratorBasedBuilder, skip_registration=True):
-    def __init__(
-        self,
-        raw_dir,
-        name,
-        dataset_config,
-        enable_beam,
-        max_episodes=None,              # ✅ NEW
-        *,
-        file_format=None,
-        **kwargs,
-    ):
+    def __init__(self, raw_dir, name, dataset_config, enable_beam, *, file_format=None, **kwargs):
         self.name = name
         self.VERSION = kwargs["version"]
         self.raw_dir = raw_dir
         self.dataset_config = dataset_config
         self.enable_beam = enable_beam
-        self.max_episodes = max_episodes  # ✅ NEW
         self.__module__ = "lerobot2rlds"
         super().__init__(file_format=file_format, **kwargs)
-
 
     def _info(self) -> tfds.core.DatasetInfo:
         return rlds_base.build_info(
@@ -316,7 +295,7 @@ class DatasetBuilder(tfds.core.GeneratorBasedBuilder, skip_registration=True):
         
         def _generate_examples_beam(episode_index: int, raw_dir: Path):
             episode = []
-            dataset = LeRobotDataset("deepansh-methdai/apple_box", raw_dir, episodes=[episode_index])
+            dataset = LeRobotDataset("", raw_dir, episodes=[episode_index], load_images=False)
 
             meta = dataset.meta.episodes[episode_index]
             expected_length = meta["length"]
@@ -328,49 +307,68 @@ class DatasetBuilder(tfds.core.GeneratorBasedBuilder, skip_registration=True):
                 obs, act, lang = parse_step(data_item)
                 frame_index = data_item["frame_index"].item()
                 lang = "Place the red apple in the brown box."
-            
-            # ---------------- CACHED TRANSFORM LOOKUP ----------------
 
-            key = (episode_index, frame_index)
-            transform = TRANSFORMS[key]
+                # ---------------- NEW SIDE-EFFECT LOGIC ----------------
 
-            # Optional: if you want to keep grip logic
-            grip = 0  # or compute offline if you cached it
+                # Split actions
+                action_vec = act["action"]
+                first_14 = action_vec[:14]          # (14,)
+                right = first_14[7:]         # (7,)
+                gripper_act = action_vec[21:]
 
-            arr = [
-                transform[0],
-                transform[1],
-                transform[2],
-                transform[3],
-                transform[4],
-                transform[5],
-                transform[6],
-            ]
+                # Publish joints
+                params = []
+                # print("right", right)
+                for i in range(len(right)):
+                    params.append(("float_arr", right[i].item()))
 
-            act["action"] = np.asarray(arr, dtype=np.float32)
+                resp = requests.get(url_joint, params=params)
+                # print(resp.status_code, resp.json())
+                params.clear()
 
-            # ---------------------------------------------------------
+                time.sleep(0.1)
 
-            step = {
-                "observation": obs,
-                "action": act,
-                "language_instruction": lang,
-                "is_first": frame_index == 0,
-                "is_last": frame_index == expected_length - 1,
-                "is_terminal": frame_index == expected_length - 1,
-            }
+                # Query transform
+                resp = requests.get("http://localhost:8000/transform")
+                # print(resp.status_code)
+                # print(resp.json())f
 
-            # ---- HARD ASSERTIONS (from original) ----
-            assert isinstance(step["observation"], dict)
-            assert isinstance(step["action"], dict)
+                transform = resp.json()  # NOTE: currently unused (side-effect only)
 
-            for k, v in step["action"].items():
-                assert hasattr(v, "shape"), f"Action {k} is not tensor-like"
+                # Gripper state (side-effect only)
+                grip = gripper_state(gripper_act)
+                
+                arr = [transform[0], transform[1], transform[2], transform[3], transform[4], transform[5], grip]
 
-            assert isinstance(step["is_first"], bool)
-            assert isinstance(step["is_last"], bool)
+                act["action"] = np.asarray(arr, dtype=np.float32)
 
-            episode.append(step)
+                print("TRANSFORM", transform)
+
+
+                # -------------------------------------------------------
+
+
+
+                step = {
+                    "observation": obs,
+                    "action": act,
+                    "language_instruction": lang,
+                    "is_first": frame_index == 0,
+                    "is_last": frame_index == expected_length - 1,
+                    "is_terminal": frame_index == expected_length - 1,
+                }
+
+                # ---- HARD ASSERTIONS (from original) ----
+                assert isinstance(step["observation"], dict)
+                assert isinstance(step["action"], dict)
+
+                for k, v in step["action"].items():
+                    assert hasattr(v, "shape"), f"Action {k} is not tensor-like"
+
+                assert isinstance(step["is_first"], bool)
+                assert isinstance(step["is_last"], bool)
+
+                episode.append(step)
 
             print(f"Collected steps: {len(episode)}")
 
@@ -385,140 +383,35 @@ class DatasetBuilder(tfds.core.GeneratorBasedBuilder, skip_registration=True):
 
             return episode_index, {"steps": episode}
 
-
         def _generate_examples_regular():
-
-            episode_count = 0
-
-            arr = [0.0] * 7 
-            arr2 = [0.0] * 7
-            arr3 = [0.0] * 7 
-
-            dataset = LeRobotDataset("deepansh-methdai/apple_box", self.raw_dir)
-
+            dataset = LeRobotDataset("", self.raw_dir)
             episode = []
-            current_episode_index = None
-            expected_length = None
+            current_episode_index = 0
 
             for data_item in dataset:
-                episode_index = int(data_item["episode_index"].item())
-                frame_index = int(data_item["frame_index"].item())
-
-
-                # ---------- NEW EPISODE ----------
-                if current_episode_index is None:
-                    current_episode_index = episode_index
-                    expected_length = dataset.meta.episodes[episode_index]["length"]
-
-                    print(f"\n=== Episode {episode_index} ===")
-                    print(f"Expected length: {expected_length}")
-
-                # ---------- EPISODE SWITCH ----------
-                if episode_index != current_episode_index:
-                    # ---- EPISODE-LEVEL ASSERTIONS ----
-                    assert len(episode) == expected_length, (
-                        f"Length mismatch: got {len(episode)}, expected {expected_length}"
-                    )
-                    assert episode[0]["is_first"] is True
-                    assert episode[-1]["is_last"] is True
-                    assert episode[-1]["is_terminal"] is True
-
+                if data_item["episode_index"] != current_episode_index:
+                    episode[-1]["is_last"] = True
+                    episode[-1]["is_terminal"] = True
                     yield f"{current_episode_index}", {"steps": episode}
-                    episode_count += 1
-
-                    if self.max_episodes is not None and episode_count >= self.max_episodes:
-                        return
-
-
-                    # reset
                     episode = []
-                    current_episode_index = episode_index
-                    expected_length = dataset.meta.episodes[episode_index]["length"]
+                    current_episode_index = data_item["episode_index"]
 
-                    print(f"\n=== Episode {episode_index} ===")
-                    print(f"Expected length: {expected_length}")
-
-                # ---------- STEP PARSING ----------
                 obs, act, lang = parse_step(data_item)
 
-                # Force language (beam behavior)
-                lang = "Place the red apple in the brown box."
-                #force states
-
-                key1 = (episode_index, frame_index)
-                # print(STATE)
-                states = STATE[key1]
-
-
-                arr2 = [
-                    states[1],
-                    states[0],
-                    states[2],
-                    states[3],
-                    states[4],
-                    states[5],
-                    states[6]
-                ]
-
-                obs["state"] = np.asarray(arr2, dtype=np.float32)
-
-
-                # ---------- CACHED TRANSFORM LOOKUP ----------
-                key = (episode_index, frame_index)
-                transform = TRANSFORMS[key]
-
-
-                arr = [
-                    transform[1],
-                    transform[0],
-                    transform[2],
-                    transform[3],
-                    transform[4],
-                    transform[5],
-                transform[6]
-                ]
-
-                for i in range(len(arr)):
-                    arr3[i] = arr[i] - arr2[i]
-
-                act["action"] = np.asarray(arr3, dtype=np.float32)
-
-                # ---------- STEP DICT ----------
-                step = {
-                    "observation": obs,
-                    "action": act,
-                    "language_instruction": lang,
-                    "is_first": frame_index == 0,
-                    "is_last": frame_index == expected_length - 1,
-                    "is_terminal": frame_index == expected_length - 1,
-                }
-
-                # ---------- HARD ASSERTIONS ----------
-                assert isinstance(step["observation"], dict)
-                assert isinstance(step["action"], dict)
-
-                for k, v in step["action"].items():
-                    assert hasattr(v, "shape"), f"Action {k} is not tensor-like"
-
-                assert isinstance(step["is_first"], bool)
-                assert isinstance(step["is_last"], bool)
-
-                episode.append(step)
-
-            # ---------- FINAL EPISODE FLUSH ----------
-            if episode:
-                yield f"{current_episode_index}", {"steps": episode}
-
-                # ---- EPISODE-LEVEL ASSERTIONS ----
-                assert len(episode) == expected_length, (
-                    f"Length mismatch: got {len(episode)}, expected {expected_length}"
+                episode.append(
+                    {
+                        "observation": obs,
+                        "action": act,
+                        "language_instruction": lang,
+                        "is_first": data_item["frame_index"].item() == 0,
+                        "is_last": False,
+                        "is_terminal": False,
+                    }
                 )
-                assert episode[0]["is_first"] is True
-                assert episode[-1]["is_last"] is True
-                assert episode[-1]["is_terminal"] is True
 
-                yield f"{current_episode_index}", {"steps": episode}
-
+            episode[-1]["is_last"] = True
+            episode[-1]["is_terminal"] = True
+            yield f"{current_episode_index}", {"steps": episode}
 
         if self.enable_beam:
             metadata = LeRobotDatasetMetadata("", self.raw_dir)
@@ -543,10 +436,8 @@ def main(src_dir, output_dir, task_name, version, encoding_format, enable_beam, 
         version=version,
         dataset_config=dataset_config,
         enable_beam=enable_beam,
-        max_episodes=args.max_episodes,   # ✅ NEW
         file_format=FileFormat.TFRECORD,
     )
-
 
     if enable_beam:
         from apache_beam.options.pipeline_options import PipelineOptions
@@ -586,8 +477,6 @@ if __name__ == "__main__":
     parser.add_argument("--homepage", type=str, default="")
     parser.add_argument("--overall-description", type=str, default="")
     parser.add_argument("--description", type=str, default="")
-    parser.add_argument("--max-episodes", type=int, default=None)
-
 
     args = parser.parse_args()
     main(**vars(args))

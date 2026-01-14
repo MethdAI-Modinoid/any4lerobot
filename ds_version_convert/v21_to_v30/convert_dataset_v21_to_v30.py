@@ -452,7 +452,7 @@ def convert_dataset(
     if root is None and not force_conversion:
         try:
             print("Trying to download v3.0 version of the dataset from the hub...")
-            snapshot_download(repo_id, repo_type="dataset", revision=V30, local_dir=HF_LEROBOT_HOME / repo_id)
+            snapshot_download(repo_id, repo_type="dataset", local_dir=HF_LEROBOT_HOME / repo_id)
             return
         except Exception:
             print("Dataset does not have an uploaded v3.0 version. Continuing with conversion.")
@@ -480,7 +480,6 @@ def convert_dataset(
         snapshot_download(
             repo_id,
             repo_type="dataset",
-            revision=V21,
             local_dir=root,
         )
 

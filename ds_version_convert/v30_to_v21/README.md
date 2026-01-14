@@ -23,3 +23,5 @@
        --repo-id=your_id \
        --root=your_local_dir
    ```
+
+   huggingface-cli upload Aryan006/attempt --local_path /home/aryan/any4lerobot/PhysicalAI-Robotics-GR00T-Teleop-G1/g1-pick-apple

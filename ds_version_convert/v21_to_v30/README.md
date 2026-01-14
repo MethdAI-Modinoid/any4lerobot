@@ -11,5 +11,8 @@
 2. Run the converter:
     ```bash
     python convert_dataset_v21_to_v30.py \
-        --repo-id=your_id
+        --repo-id=Aryan006/v2_to_v3
     ```
+Aryan006/v2_to_v3
+
+deepansh-methdai/pick-starfruit

@@ -62,6 +62,9 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+lerobot2rlds/states.npy
+lerobot2rlds/transforms.npy
+
 
 # uv/poetry lock files
 poetry.lock
